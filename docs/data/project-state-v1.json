@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-09-21",
+  "hardware": {
+    "device": "NVIDIA DGX Spark / GB10",
+    "unified_memory_gib": 128,
+    "measured_combined_dram_bandwidth_gb_s": 271,
+    "note": "270 GB/s is used as the rounded roof in existing ledgers"
+  },
+  "frozen_inputs": {
+    "baseline_name": "flashnext-quat.sh v0.11.4",
+    "baseline_sha256": "006a19accf3067f51cd2ed8409af64b569494dbf1dd049f4d0f148f3c33eda58",
+    "sidecar_layer0_sha256": "968c509f6c9333db04228a4138bab83d4aa1f9f950aafcf4713442e5ffc9b432",
+    "runtime_image_id": "d464f3b466fa"
+  },
+  "format": {
+    "name": "Q2 rotational quaternary",
+    "codebook": [-1.0, -0.3333333333333333, 0.3333333333333333, 1.0],
+    "rotation": "FWHT H128",
+    "group_size": 128,
+    "scale_dtype": "fp16",
+    "packed_values_per_byte": 4,
+    "bytes_per_weight": 0.265625,
+    "routed_layers": 48,
+    "routed_sidecar_gib": 29.883,
+    "top_k": 10
+  },
+  "prefill": {
+    "route_batch": 32,
+    "route_output_dtype": "bf16",
+    "prompt_tokens_to_tps": [
+      {"prompt_tokens": 499, "tps": 838},
+      {"prompt_tokens": 1849, "tps": 1122},
+      {"prompt_tokens": 7276, "tps": 1164},
+      {"prompt_tokens": 28903, "tps": 1005},
+      {"prompt_tokens": 115465, "tps": 1128},
+      {"prompt_tokens": 220171, "tps": 1082}
+    ],
+    "interpretation": "PLE is below 1% of TTFT in these profiles; routed Q2 and unclassified runtime dominate"
+  },
+  "decode_short_matrix": {
+    "source": "docs/results/phase0-gb10-2026-09-21.md",
+    "single_stream_tps": {
+      "prose": {"k0": 13.81, "k1": 15.43, "k2": 15.28, "k3": 13.47},
+      "code": {"k0": 13.88, "k1": 16.82, "k2": 17.28, "k3": 16.85}
+    },
+    "geometric_mean_speedup_over_k0": {"k1": 1.088, "k2": 1.042, "k3": 0.945},
+    "current_operational_default": "k1 for general low-concurrency use; k0 for eight-stream prose",
+    "warning": "This matrix measures the frozen runtime, not quality retention"
+  },
+  "decode_component_profile": {
+    "end_to_end_single_stream_tps_range": [13.5, 14.2],
+    "routed_q2_mean_ms_per_layer": 0.466,
+    "routed_q2_extrapolated_48_ms_per_token": 22.368,
+    "routed_only_roof_tps": 44.71,
+    "tracked_full_bytes_gib_per_token_lower_bound": 2.138,
+    "tracked_byte_roof_tps_at_270_gb_s": 117.6,
+    "warning": "The byte ledger is a lower bound and excludes growing long-context attention traffic"
+  },
+  "mtp": {
+    "short_matrix_acceptance_k3": {
+      "prose_conditional_by_position": [0.65, 0.60, 0.58],
+      "code_conditional_by_position": [0.78, 0.77, 0.79]
+    },
+    "corrected_long_k1_acceptance_range": [0.085, 0.814],
+    "inferred_k1_relative_draft_runtime_cost": [0.488, 0.503],
+    "simplified_break_even_acceptance": 0.50,
+    "status": "MTP speed benefit is workload/context dependent; target-distribution fidelity of the current block/probabilistic verifier is unproven"
+  },
+  "quality": {
+    "bf16_vs_q2_end_to_end": "not measured",
+    "retention_percentage": "unknown",
+    "highest_priority_unknowns": [
+      "lm_head FP8 versus BF16",
+      "router precision and route agreement",
+      "activation-weighted error by layer and expert",
+      "MTP target-distribution fidelity",
+      "coding, reasoning, Italian and long-context quality"
+    ]
+  },
+  "profiler": {
+    "ncu_status": "not proven usable",
+    "fallback_order": ["ncu", "nsys/CUPTI", "CUDA events", "host timing"]
+  },
+  "hypotheses_not_facts": [
+    "learned/adaptive alpha can improve Q2 quality",
+    "BF16 lm_head and router are high-value precision islands",
+    "Q3/Q4 or FP8 MTP can improve acceptance enough to offset added draft cost",
+    "a small sensitive subset in Q3/Q4/NVFP4 can recover most quality loss",
+    "pentary is unnecessary unless four-level codebook capacity is measured as the limiting factor"
+  ]
+}

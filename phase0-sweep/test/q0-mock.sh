@@ -5,7 +5,9 @@ PORT="${MOCK_PORT:-18123}"
 k=0
 case "${1:-}" in
   serve)
-    if [[ -n "${EXTRA_VLLM_ARGS:-}" ]]; then
+    if [[ "${MTP_ENABLE:-0}" == "1" ]]; then
+      k="${MTP_NUM_SPECULATIVE_TOKENS:-0}"
+    elif [[ -n "${EXTRA_VLLM_ARGS:-}" ]]; then
       k=$(printf '%s' "$EXTRA_VLLM_ARGS" | grep -o '"num_speculative_tokens":[0-9]*' | grep -o '[0-9]*$' || true)
       k=${k:-0}
     fi

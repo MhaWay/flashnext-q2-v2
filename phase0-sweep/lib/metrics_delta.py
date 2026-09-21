@@ -52,15 +52,18 @@ def main():
                 for part in labels.split(","):
                     if 'le="' in part:
                         le = part.split('le="', 1)[1].strip('"}')
-                by_le[int(float(le))] = by_le.get(int(float(le)), 0.0) + dv
-            hists[base] = [by_le.get(le, 0.0) for le in sorted(by_le)]
+                by_le[le] = by_le.get(le, 0.0) + dv
+            hists[base] = by_le
         elif name.endswith(("_count", "_sum")):
             pass
         else:
-            if len(entries) == 1:
-                counters[name] = sum(delta.values())
-            else:
-                series[name] = {k.replace('"', "'")[:200]: v for k, v in delta.items()}
+            # vLLM counters normally carry engine/model labels. Always expose
+            # the aggregate as well as the per-label series: callers asking
+            # for the total must not silently get zero merely because a label
+            # was added by a newer runtime.
+            counters[name] = sum(delta.values())
+            if len(entries) > 1 or any(delta):
+                series[name] = {k[:500]: v for k, v in delta.items()}
     out = {"counters_delta": counters,
            "counter_series_deltas": series,
            "histogram_bucket_deltas": hists}
