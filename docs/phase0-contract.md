@@ -10,7 +10,7 @@ or regenerate it.
 Every short-matrix cell uses the same runtime policy:
 
 - piecewise CUDA graphs;
-- 20 GiB KV budget, 8 sequences and 8192 batched tokens;
+- 20 GiB KV budget, 8 sequences and 4096 batched tokens;
 - Q2 W13/W2 block N = 16 and expert-major threshold M = 64;
 - block rejection, probabilistic draft sampling, deterministic QSA top-k off;
 - fixed 512-token output (`ignore_eos=true`), temperature 0.5;
@@ -25,6 +25,18 @@ Long prompts are calibrated against the running model's `/tokenize` endpoint.
 The requested context size, calibrated count, prompt bytes and prompt hash are
 stored with every run. Existing prompt files without matching calibration
 metadata are regenerated.
+
+The 4096-token scheduler chunk is the stable GB10 baseline. A real 8192-token
+prefill chunk stalled before completing its first model iteration while host
+available memory fell by about 17.8 GiB over 900 seconds. The boot dummy at
+8192 bypasses routed Q2 and therefore does not precompile or validate that
+full path. `MTP_BATCHED_TOKENS=8192` remains available only as an explicit
+diagnostic until its JIT/Inductor path is fixed.
+
+Each standalone `sweep-long` invocation gets a new session ID and records the
+short-matrix session used to select k as `parent_short_session_id`. This keeps
+reruns with different scheduler chunks or output lengths from being averaged
+together. `LONG_KS_LIST` can explicitly constrain diagnostic long runs.
 
 ## Metric definitions
 
