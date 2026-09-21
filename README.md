@@ -4,10 +4,9 @@ Public workspace for the runtime **v2 rewrite** of the FlashNext-Q2 pipeline
 (offline PTQ to Q2 quaternary format + GPU runtime) targeting **Qwen3.8-Flash-Next
 MoE on DGX Spark / GB10**.
 
-**Status: Phase 0.** The purpose of this repository is to *measure before we
-rewrite*: an end-to-end sweep that separates MoE-kernel cost from MTP cost,
-QSA-metadata cost and scheduler cost, so the v2 kernel design starts from
-numbers instead of assumptions.
+**Status: Phase 0 baseline captured; Phase 1 profiling next.** The measurement
+sweep separates MoE-kernel cost from MTP cost, QSA-metadata cost and scheduler
+cost, so the v2 kernel design starts from numbers instead of assumptions.
 
 ## Safety contract
 
