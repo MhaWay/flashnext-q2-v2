@@ -43,14 +43,16 @@ mkdir -p "$RERUN_RESULTS"
 cp "$RESULTS_DIR/results.jsonl" "$RESULTS_DIR/current-session.txt" "$RERUN_RESULTS/"
 RESULTS_DIR="$RERUN_RESULTS" LONG_KS_LIST=0 WARMUP_REPEATS=0 LONG_REPEATS=1 \
   bash "$BASE/phase0-sweep.sh" sweep-long
-python3 - "$RERUN_RESULTS/results.jsonl" "$SHORT_SESSION" <<'PY'
+python3 - "$RERUN_RESULTS/results.jsonl" "$RERUN_RESULTS/summary.json" "$SHORT_SESSION" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
-short_session = sys.argv[2]
+summary = json.load(open(sys.argv[2]))
+short_session = sys.argv[3]
 last = rows[-1]
 assert last["phase"] == "long"
 assert last["session_id"] != short_session
 assert last["parent_short_session_id"] == short_session
 assert last["max_num_batched_tokens"] == 4096
+assert summary and {r["session_id"] for r in summary} == {last["session_id"]}
 PY
 echo "SMOKE OK: $(wc -l < "$RESULTS_DIR/results.jsonl") rows"
