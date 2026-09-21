@@ -49,6 +49,7 @@ MEM_SAMPLER_PID=""
 SERVER_LAUNCH_PID=""
 HAVE_METRICS=0
 BASELINE_SHA=""
+HARNESS_SHA=""
 SIDECAR_SHA=""
 RUNTIME_IMAGE_ID=""
 
@@ -226,12 +227,18 @@ run_cell() {
 
   local is_warmup=false
   if (( warmup == 1 )); then is_warmup=true; fi
+  local prompt_meta="${prompt}.meta.json" prompt_calibrated_tokens=null prompt_bytes
+  prompt_bytes=$(wc -c < "$prompt")
+  if [[ -f "$prompt_meta" ]]; then
+    prompt_calibrated_tokens=$(jq -r '.calibrated_tokens // "null"' "$prompt_meta")
+  fi
   cat > "$dir/config.json" <<JSON
 {
   "run_id": "$run_id", "session_id": "$RUN_SESSION_ID",
   "ts": "$(date -u +%Y-%m-%dT%H:%M:%SZ)", "phase": "$phase",
   "warmup": $is_warmup, "repeat": $rep, "workload": "$workload", "k": $k, "streams": $streams,
   "form_m_estimate": $form_m, "context_tokens": $ctx,
+  "prompt_calibrated_tokens": $prompt_calibrated_tokens, "prompt_bytes": $prompt_bytes,
   "prompt_sha256": "$(sha256_of "$prompt")"
 }
 JSON
@@ -246,9 +253,9 @@ JSON
   python3 "$HERE/lib/metrics_delta.py" "$dir/metrics_before.txt" "$dir/metrics_after.txt" "$dir/metrics_delta.json" \
     || echo '{"counters_delta":{},"histogram_bucket_deltas":{},"counter_series_deltas":{}}' > "$dir/metrics_delta.json"
 
-  python3 - "$dir" "$RESULTS_DIR/results.jsonl" "$BASELINE_SHA" "$SIDECAR_SHA" "$RUNTIME_IMAGE_ID" <<'PY'
+  python3 - "$dir" "$RESULTS_DIR/results.jsonl" "$BASELINE_SHA" "$HARNESS_SHA" "$SIDECAR_SHA" "$RUNTIME_IMAGE_ID" <<'PY'
 import json, os, re, sys
-dir_, results_path, script_sha, sidecar_sha, image_digest = sys.argv[1:6]
+dir_, results_path, script_sha, harness_sha, sidecar_sha, image_digest = sys.argv[1:7]
 cfg = json.load(open(os.path.join(dir_, "config.json")))
 res = json.load(open(os.path.join(dir_, "streams.json")))
 md  = json.load(open(os.path.join(dir_, "metrics_delta.json")))
@@ -288,9 +295,13 @@ rec = {
   "phase": cfg["phase"], "warmup": cfg["warmup"],
   "repeat": cfg["repeat"], "workload": cfg["workload"], "k": cfg["k"], "streams": cfg["streams"],
   "form_m_estimate": cfg["form_m_estimate"], "context_tokens": cfg["context_tokens"],
+  "prompt_calibrated_tokens": cfg.get("prompt_calibrated_tokens"),
+  "prompt_bytes": cfg.get("prompt_bytes"),
   "prompt_sha256": cfg["prompt_sha256"], "script_sha256": script_sha,
+  "harness_sha256": harness_sha,
   "sidecar_layer0_sha256": sidecar_sha, "runtime_image_digest": image_digest,
   "output_tokens": res.get("output_tokens", 0), "decode_tokens": res.get("decode_tokens", 0),
+  "visible_chunks": res.get("visible_chunks", 0),
   "decode_window_s": res.get("decode_window_s"), "aggregate_tps": res.get("aggregate_tps", 0.0),
   "request_total_tps": res.get("request_total_tps", 0.0),
   "per_stream_tps": res.get("per_stream_tps_mean", 0.0),
@@ -314,6 +325,7 @@ print(f"{cfg['run_id']}: agg_tps={rec['aggregate_tps']:.2f} per_stream={rec['per
 PY
   if (( rc != 0 )); then warn "run $run_id finished with stream errors (rc=$rc)"; fi
   sleep "$INTER_DELAY"
+  return "$rc"
 }
 
 # -------------------------------------------------------------- phases ----
@@ -338,21 +350,11 @@ TXT
 }
 
 ensure_long_prompt() {
-  local n=$1 path="$HERE/prompts/ctx$1.txt"
-  [[ -s "$path" ]] && { echo "$path"; return 0; }
+  local n=$1 path="$HERE/prompts/ctx$1.txt" meta="$HERE/prompts/ctx$1.txt.meta.json"
   mkdir -p "$HERE/prompts"
-  python3 - "$n" "$path" <<'PY'
-import sys
-target = max(int(sys.argv[1]) - 640, 32)
-words = ("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega "
-         * ((target // 10) // 27 + 1)).split()
-text = " ".join(words[: target * 13 // 20 + 8])
-open(sys.argv[2], "w").write(
-  "The following is a long synthetic reference document assembled for context-retrieval benchmarking. "
-  "Reference document begins: " + text +
-  " Reference document ends. Question: According to the reference document above, what is the final marker word? Answer concisely. "
-  "Marker word: ZQX-7714-DELTA.")
-PY
+  python3 "$HERE/lib/make_long_prompt.py" \
+    --base-url "$BASE_URL" --model "$MODEL" --target-tokens "$n" \
+    --no-thinking "$NO_THINKING" --out "$path" --meta "$meta" >&2
   echo "$path"
 }
 
@@ -370,7 +372,8 @@ sweep_short() {
         for i in $(seq 1 $(( WARMUP_REPEATS + MEASURED_REPEATS ))); do
           local warmup=0 rep=$(( i - WARMUP_REPEATS ))
           if (( i <= WARMUP_REPEATS )); then warmup=1; rep=$i; fi
-          run_cell short "$k" "$streams" "$workload" 0 "$rep" "$warmup" "$prompt"
+          run_cell short "$k" "$streams" "$workload" 0 "$rep" "$warmup" "$prompt" \
+            || die "short cell failed: k=$k streams=$streams workload=$workload"
         done
       done
     done
@@ -416,7 +419,8 @@ sweep_long() {
       for i in $(seq 1 $(( WARMUP_REPEATS + LONG_REPEATS ))); do
         local warmup=0 rep=$(( i - WARMUP_REPEATS ))
         if (( i <= WARMUP_REPEATS )); then warmup=1; rep=$i; fi
-        run_cell long "$k" 1 long "$ctx" "$rep" "$warmup" "$prompt"
+        run_cell long "$k" 1 long "$ctx" "$rep" "$warmup" "$prompt" \
+          || die "long cell failed: k=$k context=$ctx warmup=$warmup"
       done
     done
     server_stop
@@ -435,6 +439,10 @@ require_fingerprint() {
   [[ -f "$Q0_SCRIPT" ]] || die "frozen baseline not found at Q0_SCRIPT=$Q0_SCRIPT"
   mkdir -p "$RESULTS_DIR/runs" "$HERE/prompts"
   [[ -n "$BASELINE_SHA" ]] || BASELINE_SHA="$(sha256_of "$Q0_SCRIPT")"
+  if [[ -z "$HARNESS_SHA" ]]; then
+    HARNESS_SHA="$(sha256sum "$HERE/phase0-sweep.sh" "$HERE/lib/bench_stream.py" \
+      "$HERE/lib/metrics_delta.py" "$HERE/lib/make_long_prompt.py" | sha256sum | awk '{print $1}')"
+  fi
   if [[ -z "$SIDECAR_SHA" && -n "${SIDECAR_LAYER0:-}" && -f "$SIDECAR_LAYER0" ]]; then
     # Layer-0 can be large. Hash it once per harness process, never once per
     # benchmark cell, or the fingerprint itself perturbs the I/O experiment.
@@ -449,6 +457,7 @@ check() {
   require_fingerprint
   log "=== Phase 0.1: environment, fingerprints, profiler verification ==="
   log "frozen baseline sha256: $BASELINE_SHA"
+  log "measurement harness sha256: $HARNESS_SHA"
   if [[ -n "$SIDECAR_SHA" ]]; then
     log "sidecar layer-0 sha256: $SIDECAR_SHA"
   else
@@ -494,7 +503,7 @@ if do_probe and ncu_test and image_present and shutil.which("docker"):
         "python3 -c 'import torch; x=torch.rand(1<<20, device=\"cuda\"); print(float(x.sum()))'"
     )
     probe = run(["docker", "run", "--rm", "--gpus", "all", "--cap-add", "SYS_ADMIN",
-                 image, "bash", "-lc", probe_cmd], timeout=420)
+                 "--entrypoint", "bash", image, "-lc", probe_cmd], timeout=420)
     out["ncu_kernel_probe"] = probe
     out["ncu_usable"] = probe.get("rc") == 0 and "Traceback" not in probe.get("stdout_head", "") + probe.get("stderr_head", "")
 if "ncu_usable" not in out:

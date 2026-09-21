@@ -24,9 +24,14 @@ assert {r["k"] for r in measured} == {0, 1, 2, 3}
 assert {r["streams"] for r in measured} == {1, 4}
 assert all(r["repeat"] == 1 for r in measured)
 assert all(r["decode_tokens"] == 7 * r["streams"] for r in measured)
+assert all(r["visible_chunks"] == 4 * r["streams"] for r in measured)
+assert all(r["decode_window_s"] >= r["wall_time_s"] - r["ttft_s_p95"] - 0.01 for r in measured)
 assert all(r["draft_cycles"] > 0 for r in measured if r["k"] > 0)
 assert all(r["accepted_by_position"] for r in measured if r["k"] > 0)
 assert all(r["memory_peak_gib"] is None for r in rows)
-assert any(r["phase"] == "long" and not r["warmup"] for r in rows)
+assert all(r["harness_sha256"] for r in rows)
+long_rows = [r for r in rows if r["phase"] == "long" and not r["warmup"]]
+assert long_rows
+assert all(r["prompt_calibrated_tokens"] for r in long_rows)
 PY
 echo "SMOKE OK: $(wc -l < "$RESULTS_DIR/results.jsonl") rows"

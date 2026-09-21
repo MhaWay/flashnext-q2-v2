@@ -55,6 +55,9 @@ Piece overrides: `SHORT_KS_LIST`, `SHORT_STREAMS_LIST`, `SHORT_WORKLOADS_LIST`,
 3. `counters_k<N>.json` records the exact spec_decode metric names exposed by
    the running server; acceptance columns fall back to zero (with a warning)
    if absent.
+4. Long prompts are generated against the live `/tokenize` endpoint and carry
+   calibration metadata. Delete neither `ctx*.txt` nor its `.meta.json` alone;
+   a missing or mismatched pair is regenerated automatically.
 
 ## Smoke test (no GPU, no server)
 
@@ -77,3 +80,7 @@ built-in mock vLLM endpoint.
 
 The exact Phase 0 measurement contract, MTP break-even model and promotion
 gates are in [`docs/phase0-contract.md`](docs/phase0-contract.md).
+
+The first GB10 hardware bundle and the measurement corrections it exposed are
+reviewed in
+[`docs/results/phase0-gb10-2026-09-21.md`](docs/results/phase0-gb10-2026-09-21.md).

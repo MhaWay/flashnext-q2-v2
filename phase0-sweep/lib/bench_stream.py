@@ -20,7 +20,9 @@ def stream_one(base, model, prompt, args, slot, start_barrier):
     nonce = uuid.uuid4().hex
     body = {
         "model": model,
-        "messages": [{"role": "user", "content": f"{prompt}\nUnique benchmark nonce: {nonce}"}],
+        # Prefix caching stops at the first differing token.  A nonce at the
+        # end leaves the whole long prompt cacheable, so it must come first.
+        "messages": [{"role": "user", "content": f"Unique benchmark nonce: {nonce}\n{prompt}"}],
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "ignore_eos": True,
@@ -71,7 +73,10 @@ def stream_one(base, model, prompt, args, slot, start_barrier):
         last_visible = last_visible or t_end
         completion_tokens = int((usage or {}).get("completion_tokens") or visible_chunks)
         decode_tokens = max(completion_tokens - 1, 0)
-        decode_s = max(last_visible - first_visible, 0.0)
+        # Use the completed SSE response as the decode boundary.  With
+        # ignore_eos=true, vLLM can account generated EOS/control tokens that
+        # have no visible delta; last_visible would then overstate tok/s.
+        decode_s = max(t_end - first_visible, 0.0)
         slot.update(
             ok=True,
             sent=t0,
@@ -84,6 +89,7 @@ def stream_one(base, model, prompt, args, slot, start_barrier):
             decode_tps=(decode_tokens / decode_s if decode_s > 0 else None),
             end=t_end,
             completion_tokens=completion_tokens,
+            visible_chunks=visible_chunks,
             prompt_tokens=(usage or {}).get("prompt_tokens"),
         )
     except Exception as exc:  # noqa: BLE001 - any stream failure is reportable
@@ -129,11 +135,12 @@ def main():
     per_stream = [s["decode_tps"] for s in ok if s.get("decode_tps") is not None]
     decode_window = 0.0
     if ok:
-        decode_window = max(s["last"] for s in ok) - min(s["first"] for s in ok)
+        decode_window = max(s["end"] for s in ok) - min(s["first"] for s in ok)
 
     result = {
         "wall_time_s": round(wall, 3),
         "output_tokens": total_tokens,
+        "visible_chunks": sum(int(s.get("visible_chunks") or 0) for s in ok),
         "decode_tokens": decode_tokens,
         "decode_window_s": round(decode_window, 6),
         "aggregate_tps": round(decode_tokens / decode_window, 3) if decode_window > 0 and decode_tokens else 0.0,
@@ -149,7 +156,9 @@ def main():
             {"ttft": s.get("ttft"), "elapsed": round(s.get("elapsed", 0), 3),
              "decode_s": round(s.get("decode_s", 0), 6),
              "decode_tokens": s.get("decode_tokens"), "decode_tps": s.get("decode_tps"),
-             "completion_tokens": s.get("completion_tokens"), "prompt_tokens": s.get("prompt_tokens")}
+             "completion_tokens": s.get("completion_tokens"),
+             "visible_chunks": s.get("visible_chunks"),
+             "prompt_tokens": s.get("prompt_tokens")}
             for s in ok
         ],
     }

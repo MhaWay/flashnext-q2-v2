@@ -18,23 +18,32 @@ Every short-matrix cell uses the same runtime policy:
 
 Only MTP depth k and simultaneous stream count change. The nominal decode form
 is `M = streams * (k + 1)` for k > 0 and `M = streams` for k = 0. Every request
-gets a unique nonce so prefix caching cannot turn TTFT into a cache benchmark.
+gets a unique nonce at the beginning of the user message, so prefix caching
+cannot retain the long synthetic document before reaching the nonce.
+
+Long prompts are calibrated against the running model's `/tokenize` endpoint.
+The requested context size, calibrated count, prompt bytes and prompt hash are
+stored with every run. Existing prompt files without matching calibration
+metadata are regenerated.
 
 ## Metric definitions
 
 - `TTFT = first visible SSE token - request send`.
-- Per-stream decode throughput excludes the first token:
-  `(completion_tokens - 1) / (last_visible - first_visible)`.
-- Aggregate decode throughput uses the union of the visible decode windows:
-  `sum(completion_tokens - 1) / (max(last_visible) - min(first_visible))`.
+- Per-stream decode throughput excludes TTFT and the first token:
+  `(completion_tokens - 1) / (response_complete - first_visible)`.
+- Aggregate decode throughput uses the union of the completed decode windows:
+  `sum(completion_tokens - 1) / (max(response_complete) - min(first_visible))`.
+  The response boundary is intentional: with `ignore_eos=true`, completion
+  usage can include generated EOS/control tokens that produce no visible SSE
+  delta. Ending at the last visible delta would report impossible throughput.
 - `request_total_tps` includes TTFT and exists only as a diagnostic; it is not
   the headline decode number.
 - vLLM counters are differenced before/after every cell. Labeled counters are
   summed across engine/model labels while the original series are retained.
 
-The result record includes hashes of the baseline script, layer-0 sidecar and
-prompt plus the runtime image ID. A comparison without matching fingerprints
-is invalid.
+The result record includes hashes of the frozen baseline, measurement harness,
+layer-0 sidecar and prompt plus the runtime image ID. A comparison without
+matching fingerprints is invalid.
 
 ## MTP cost model
 

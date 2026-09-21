@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Mock vLLM-compatible endpoint for phase0-sweep smoke tests.
 
-Implements: GET /v1/models, GET /metrics (cumulative counters),
-POST /v1/chat/completions (SSE, fixed 8 tokens, ignore_eos honoured shape-wise).
-Advances speculative-decode counters on every completion when --k>0.
+Implements: GET /v1/models, GET /metrics (cumulative counters), POST /tokenize,
+and POST /v1/chat/completions (SSE, fixed 8 accounted tokens, four visible
+chunks). Advances speculative-decode counters on every completion when --k>0.
 """
 import argparse
 import json
@@ -65,6 +65,18 @@ class Handler(BaseHTTPRequestHandler):
         req = json.loads(self.rfile.read(length) or b"{}")
         prompt = json.dumps(req.get("messages", ""))
         prompt_tokens = max(1, len(prompt) // 4)
+        if self.path.startswith("/tokenize"):
+            body = json.dumps({
+                "count": prompt_tokens,
+                "max_model_len": 262144,
+                "tokens": [1] * prompt_tokens,
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         with LOCK:
             C["requests"] += 1
             C["prompt_tok"] += prompt_tokens
@@ -82,11 +94,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        for _ in range(8):
+        for _ in range(4):
             time.sleep(0.002)
             chunk = {"choices": [{"index": 0, "delta": {"content": " tok"}}]}
             self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
             self.wfile.flush()
+        # Account four additional invisible tokens before DONE.  This catches
+        # clients that incorrectly end the decode window at last visible text.
+        time.sleep(0.008)
         usage = {"choices": [], "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 8}}
         self.wfile.write(("data: " + json.dumps(usage) + "\n\n").encode())
         self.wfile.write(b"data: [DONE]\n\n")
