@@ -388,7 +388,7 @@ sweep_short() {
     done
     server_stop
   done
-  report || true
+  report "$RUN_SESSION_ID" || true
 }
 
 best_ks_from_results() {
@@ -435,7 +435,7 @@ sweep_long() {
     done
     server_stop
   done
-  report || true
+  report "$RUN_SESSION_ID" || true
 }
 
 # -------------------------------------------------------------- check ----
@@ -531,14 +531,16 @@ PY
 # -------------------------------------------------------------- report ----
 
 report() {
+  local session_filter="${1:-}"
   [[ -s "$RESULTS_DIR/results.jsonl" ]] || { echo "no results yet"; return 0; }
-  python3 - "$RESULTS_DIR/results.jsonl" "$RESULTS_DIR/summary.csv" "$RESULTS_DIR/summary.json" <<'PY'
+  python3 - "$RESULTS_DIR/results.jsonl" "$RESULTS_DIR/summary.csv" "$RESULTS_DIR/summary.json" "$session_filter" <<'PY'
 import json, sys, csv, statistics as st
-path, csv_out, json_out = sys.argv[1:4]
+path, csv_out, json_out, session_filter = sys.argv[1:5]
 rows = []
 for line in open(path):
     row = json.loads(line)
-    if not row.get("warmup") and row.get("valid", True):
+    if (not row.get("warmup") and row.get("valid", True)
+            and (not session_filter or row.get("session_id") == session_filter)):
         rows.append(row)
 if not rows:
     print("no measured rows"); sys.exit(0)
