@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# DGX Spark / GB10 unified memory may not expose memory.used through nvidia-smi.
+printf '[N/A]\n'

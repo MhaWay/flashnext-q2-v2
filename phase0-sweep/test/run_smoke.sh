@@ -5,6 +5,7 @@
 set -Eeuo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE="$(dirname "$HERE")"
+export PATH="$HERE/fake-bin:$PATH"
 export Q0_SCRIPT="$HERE/q0-mock.sh"
 export BASE_URL="http://127.0.0.1:18123"
 export RESULTS_DIR="$HERE/results"
@@ -25,6 +26,7 @@ assert all(r["repeat"] == 1 for r in measured)
 assert all(r["decode_tokens"] == 7 * r["streams"] for r in measured)
 assert all(r["draft_cycles"] > 0 for r in measured if r["k"] > 0)
 assert all(r["accepted_by_position"] for r in measured if r["k"] > 0)
+assert all(r["memory_peak_gib"] is None for r in rows)
 assert any(r["phase"] == "long" and not r["warmup"] for r in rows)
 PY
 echo "SMOKE OK: $(wc -l < "$RESULTS_DIR/results.jsonl") rows"

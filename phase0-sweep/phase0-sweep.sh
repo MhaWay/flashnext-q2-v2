@@ -252,15 +252,25 @@ dir_, results_path, script_sha, sidecar_sha, image_digest = sys.argv[1:6]
 cfg = json.load(open(os.path.join(dir_, "config.json")))
 res = json.load(open(os.path.join(dir_, "streams.json")))
 md  = json.load(open(os.path.join(dir_, "metrics_delta.json")))
-gpu, host_min = 0.0, None
+gpu, host_min = None, None
 mp = os.path.join(dir_, "mem_samples.txt")
 if os.path.exists(mp):
     for line in open(mp):
         p = line.split()
         if len(p) >= 3:
-            gpu = max(gpu, float(p[1]) / 1024.0)
-            h = float(p[2]) / 1048576.0
-            host_min = h if host_min is None else min(host_min, h)
+            # GB10 uses unified memory and nvidia-smi may report [N/A] for
+            # memory.used. Keep the run valid and represent unavailable GPU
+            # memory as null instead of aborting the entire sweep.
+            try:
+                g = float(p[1]) / 1024.0
+                gpu = g if gpu is None else max(gpu, g)
+            except (TypeError, ValueError):
+                pass
+            try:
+                h = float(p[2]) / 1048576.0
+                host_min = h if host_min is None else min(host_min, h)
+            except (TypeError, ValueError):
+                pass
 cd = md.get("counters_delta", {})
 def g(n): return int(cd.get(n, 0) or 0)
 per_pos_map = {}
@@ -290,7 +300,7 @@ rec = {
   "draft_tokens":  g("vllm:spec_decode_num_draft_tokens_total"),
   "accepted_tokens": g("vllm:spec_decode_num_accepted_tokens_total"),
   "accepted_by_position": per_pos,
-  "memory_peak_gib": round(gpu, 3),
+  "memory_peak_gib": round(gpu, 3) if gpu is not None else None,
   "mem_available_min_gib": round(host_min, 3) if host_min is not None else None,
   "streams_ok": res.get("ok_streams", 0), "streams_err": res.get("err_streams", 0),
   "valid": res.get("ok_streams", 0) == cfg["streams"] and res.get("err_streams", 0) == 0,
@@ -530,7 +540,8 @@ for key, rs in sorted(groups.items()):
         "mean_ttft_s": round(st.mean(tt), 3) if tt else None,
         "accepted_per_cycle": round(at / dc, 3) if dc else None,
         "accept_per_draft_token": round(at / dt, 3) if dt else None,
-        "memory_peak_gib_max": max((r["memory_peak_gib"] for r in rs), default=None),
+        "memory_peak_gib_max": max((r["memory_peak_gib"] for r in rs
+                                     if r.get("memory_peak_gib") is not None), default=None),
     })
 with open(csv_out, "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=list(summary[0].keys())); w.writeheader(); w.writerows(summary)
