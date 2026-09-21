@@ -4,13 +4,14 @@ Public workspace for the runtime **v2 rewrite** of the FlashNext-Q2 pipeline
 (offline PTQ to Q2 quaternary format + GPU runtime) targeting **Qwen3.8-Flash-Next
 MoE on DGX Spark / GB10**.
 
-**Status: Phase 0.** The purpose of this repository is to *measure before we
-rewrite*. It now contains two independent gates:
+**Status: Phase 1 candidate generation.** Phase 0 remains frozen and the
+repository now adds a separate, non-serving path for adaptive weight creation.
+The evidence workspace contains:
 
 1. a performance sweep that separates MoE-kernel cost from MTP, QSA metadata
    and scheduler cost;
-2. a quality baseline that compares the Q2 stack with an identified reference
-   before adaptive codebooks or mixed precision are promoted.
+2. a quality baseline that compares the Q2 stack with an identified reference;
+3. an activation-aware adaptive-Q2 plus budgeted-Q4 conversion pipeline.
 
 ## Safety contract
 
@@ -27,6 +28,7 @@ rewrite*. It now contains two independent gates:
     ├── AGENTS.md                  # shared facts, boundaries and contribution contract
     ├── phase0-sweep/              # performance and MTP sweep
     ├── quality-phase0/            # objective quality runner and long-context generator
+    ├── phase1-quant/              # calibration, sensitivity, selection, conversion
     └── docs/
         ├── phase0-contract.md
         ├── quality-phase0-contract.md
@@ -84,6 +86,17 @@ and 250K. Full commands and promotion gates are in
 
 The bundled taskset validates the machinery; it is not sufficient for a
 public “quality retention” claim. BF16-versus-Q2 quality is currently unknown.
+
+## Phase 1 weight generation
+
+Phase 1 keeps H128 and the packed 2-bit representation, selects alpha per
+group from a fixed table using routed activation moments, and allocates a
+global Q4 precision-island budget by measured error recovery per byte. It
+creates a new directory and never overwrites the v0.11.4 rollback sidecars.
+
+The exact Spark commands and compatibility boundary are in
+[`phase1-quant/README.md`](phase1-quant/README.md); the design and promotion
+gates are in [`docs/phase1-architecture.md`](docs/phase1-architecture.md).
 
 ## Roadmap (after Phase 0 data)
 

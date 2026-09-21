@@ -1,8 +1,8 @@
 # Agent contract
 
 This repository is the shared, evidence-first workspace for FlashNext-Q2 v2.
-Read this file, `docs/phase0-contract.md`, and
-`docs/quality-phase0-contract.md` before changing runtime or quantization code.
+Read this file, `docs/phase0-contract.md`, `docs/quality-phase0-contract.md`,
+and `docs/phase1-architecture.md` before changing runtime or quantization code.
 
 ## Non-negotiable boundaries
 
@@ -19,6 +19,9 @@ Read this file, `docs/phase0-contract.md`, and
   exact and requires a k=0 versus k>0 seeded output audit.
 - Never commit API keys, Hugging Face tokens, generated 250K prompts, raw model
   weights or large result bundles.
+- Phase 1 adaptive sidecars are not compatible with the v0.11.4 runtime. Never
+  replace the rollback Q2 directory or silently point the frozen control at
+  `flashnext-q2-adaptive-v1`.
 
 ## Current verified baseline
 
@@ -56,7 +59,7 @@ first-class results.
   human-readable interpretation.
 - Tests must run without a GPU using the mock endpoints.
 - Run `phase0-sweep/test/run_smoke.sh` and
-  `quality-phase0/test/run_smoke.sh` before requesting review.
+  `quality-phase0/test/run_smoke.sh` and `phase1-quant/test/run_smoke.sh`
+  before requesting review.
 - Put large artifacts in a release, external bundle or ignored `results/`
   directory; commit only compact summaries with hashes and provenance.
-

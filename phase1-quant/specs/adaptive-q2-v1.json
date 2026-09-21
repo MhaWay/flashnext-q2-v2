@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "format": "flashnext-q2-adaptive-v1",
+  "base_format": "flashnext-q2-offline-bf16-v3",
+  "group_size": 128,
+  "rotation": "normalized-fwht-h128-input-blocks",
+  "q2": {
+    "bits": 2,
+    "packing": "four-little-endian-2bit-codes-per-byte",
+    "code_order": ["-1", "-alpha", "+alpha", "+1"],
+    "alpha_table": [0.2, 0.25, 0.3, 0.3333333333333333, 0.4, 0.5],
+    "alpha_index_dtype": "uint8",
+    "scale_dtype": "float16",
+    "scale_fit_iterations": 2,
+    "error_metric": "rotated-activation-second-moment-weighted-mse"
+  },
+  "precision_islands": {
+    "enabled": true,
+    "selection_unit": "whole-expert-gate-up-down",
+    "selection_metric": "weighted-error-recovery-per-added-byte",
+    "budget_fraction_default": 0.05,
+    "storage": "companion-q4-sidecar",
+    "q4": {
+      "bits": 4,
+      "signed_range": [-7, 7],
+      "packing": "two-little-endian-nibbles-per-byte",
+      "scale_dtype": "float16",
+      "group_size": 128
+    }
+  },
+  "calibration": {
+    "required": true,
+    "w13_stat": "expert-conditioned-second-moment-of-rotated-layer-input",
+    "w2_stat": "expert-conditioned-second-moment-of-rotated-swiglu-output",
+    "minimum_routes_per_expert": 32,
+    "zero_or_underfilled_policy": "layer-mean-fallback"
+  }
+}
