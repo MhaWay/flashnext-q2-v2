@@ -1,0 +1,22 @@
+name: phase0-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Static checks
+        run: |
+          bash -n phase0-sweep/phase0-sweep.sh phase0-sweep/test/q0-mock.sh phase0-sweep/test/run_smoke.sh quality-phase0/test/run_smoke.sh
+          python3 -m py_compile phase0-sweep/lib/*.py phase0-sweep/test/mock_server.py quality-phase0/lib/*.py quality-phase0/test/mock_server.py
+      - name: Performance mock end-to-end smoke test
+        run: phase0-sweep/test/run_smoke.sh
+      - name: Quality mock end-to-end smoke test
+        run: quality-phase0/test/run_smoke.sh
