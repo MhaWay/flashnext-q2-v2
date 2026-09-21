@@ -26,14 +26,15 @@ Set paths once:
 ```bash
 cd ~/flashnext-q2-v2
 BASELINE=/home/mhaway/flashnext-quat.sh
-SOURCE=$(sudo cat /media/mhaway/XTREME1/flashnext-q2/state/source_snapshot.txt)
+SOURCE=/media/mhaway/XTREME1/flashnext-q2/source-bf16
 WORK=/media/mhaway/XTREME1/flashnext-q2/phase1
 IMAGE=vllm/vllm-openai:qwen38-flash-next
 mkdir -p "$WORK"
 ```
 
-`SOURCE` must resolve to the directory containing
-`model.safetensors.index.json`.
+`SOURCE` must be the host directory containing
+`model.safetensors.index.json`. Do not use `state/source_snapshot.txt` here:
+that file records the container-local path (`/source-bf16`).
 
 ### 1. Build the isolated calibration launcher
 
