@@ -11,25 +11,33 @@
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-: "${Q0_SCRIPT:=$HERE/../flashnext-quat.sh}"       # frozen v0.11.4 entry point
-: "${BASE_URL:=http://127.0.0.1:8000}"
+: "${Q0_SCRIPT:=${HOME}/flashnext-quat.sh}"        # frozen v0.11.4 entry point
+: "${PORT:=8012}"
+: "${BASE_URL:=http://127.0.0.1:${PORT}}"
 : "${RESULTS_DIR:=$HERE/results}"
 : "${RUNTIME_IMAGE:=vllm/vllm-openai:qwen38-flash-next}"
 : "${SIDECAR_DIR:=}"
 : "${SIDECAR_LAYER0:=${SIDECAR_DIR:+$SIDECAR_DIR/layer-00.safetensors}}"
 : "${MODEL:=}"
 : "${MAX_TOKENS:=512}"
-: "${TEMPERATURE:=0.0}"
+: "${TEMPERATURE:=0.5}"
 : "${REQ_TIMEOUT:=5400}"
 : "${READY_TIMEOUT:=1500}"
 : "${INTER_DELAY:=10}"
 : "${NCU_TEST:=1}"
-: "${MTP_KV_CACHE_MEMORY_BYTES:=20G}"              # applied to every k>0 cell (config parity)
+: "${PROFILE_RECHECK:=0}"
+: "${MTP_KV_CACHE_MEMORY_BYTES:=20G}"              # applied to every cell (config parity)
+: "${MTP_BATCHED_TOKENS:=8192}"
+: "${MTP_MAX_NUM_SEQS:=8}"
+: "${MTP_Q2_DECODE_W13_BLOCK_N:=16}"
+: "${MTP_Q2_DECODE_W2_BLOCK_N:=16}"
+: "${MTP_Q2_EXPERT_MAJOR_MIN_M:=64}"
 : "${MEASURED_REPEATS:=3}"
 : "${WARMUP_REPEATS:=1}"
 : "${LONG_REPEATS:=1}"
 : "${LONG_SECOND_MARGIN:=0.97}"
 : "${NO_THINKING:=1}"
+: "${RUN_SESSION_ID:=$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 SHORT_KS=( ${SHORT_KS_LIST:-0 1 2 3} )
 SHORT_STREAMS=( ${SHORT_STREAMS_LIST:-1 2 4 8} )
@@ -38,7 +46,11 @@ LONG_CONTEXTS=( ${LONG_CONTEXTS_LIST:-64 4096 32768 131072 250000} )
 
 SERVER_ACTIVE=0
 MEM_SAMPLER_PID=""
+SERVER_LAUNCH_PID=""
 HAVE_METRICS=0
+BASELINE_SHA=""
+SIDECAR_SHA=""
+RUNTIME_IMAGE_ID=""
 
 log()  { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 warn() { printf '[%s] WARN: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
@@ -61,12 +73,22 @@ wait_ready() {
   return 1
 }
 
+wait_down() {
+  local deadline=$(( $(date +%s) + 60 ))
+  while (( $(date +%s) < deadline )); do
+    if ! curl -fsS --max-time 2 "${BASE_URL}/v1/models" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 server_start() {
   # Starts the frozen v0.11.4 baseline for a given MTP k. The command arrays
   # below are the ONLY interface assumptions; override any of them via the
   # SERVER_CMD_* env vars (plain strings, eval'd) if the frozen interface
-  # differs. The JSON carries NO spaces so EXTRA_VLLM_ARGS word-splitting
-  # cannot corrupt it.
+  # differs.
   local k=$1
   local cmd
   if [[ -n "${SERVER_CMD_K0:-}" && "$k" == "0" ]]; then
@@ -75,14 +97,28 @@ server_start() {
     cmd="${SERVER_CMD_K3}"
   elif [[ "$k" != "0" && "$k" != "3" && -n "${SERVER_CMD_KN:-}" ]]; then
     cmd="${SERVER_CMD_KN//__K__/$k}"
-  elif [[ "$k" == "0" ]]; then
-    CMD=("$Q0_SCRIPT" serve)
-  elif [[ "$k" == "3" ]]; then
-    CMD=("$Q0_SCRIPT" serve-decode-mtp3)
   else
-    CMD=(env KV_CACHE_MEMORY_BYTES="${MTP_KV_CACHE_MEMORY_BYTES}"
-         EXTRA_VLLM_ARGS="--speculative-config={\"method\":\"mtp\",\"num_speculative_tokens\":$k}"
+    local mtp_enable=0 mtp_tokens=1
+    if (( k > 0 )); then mtp_enable=1; mtp_tokens=$k; fi
+    # Every k uses the same runtime policy. Comparing k=0 eager with k=3
+    # piecewise graphs would measure configuration drift, not MTP cost.
+    CMD=(env PORT="$PORT"
+         MTP_ENABLE="$mtp_enable" MTP_NUM_SPECULATIVE_TOKENS="$mtp_tokens"
+         MTP_REJECTION_SAMPLE_METHOD=block MTP_DRAFT_SAMPLE_METHOD=probabilistic
+         RUNTIME_EXECUTION_MODE=piecewise
+         MAX_NUM_BATCHED_TOKENS="$MTP_BATCHED_TOKENS" MAX_NUM_SEQS="$MTP_MAX_NUM_SEQS"
+         KV_CACHE_MEMORY_BYTES="$MTP_KV_CACHE_MEMORY_BYTES"
+         Q2_DECODE_W13_BLOCK_N="$MTP_Q2_DECODE_W13_BLOCK_N"
+         Q2_DECODE_W2_BLOCK_N="$MTP_Q2_DECODE_W2_BLOCK_N"
+         Q2_PREFILL_V8_MIN_M="$MTP_Q2_EXPERT_MAJOR_MIN_M"
+         QSA_DET_TOPK_ENABLE=0 QSA_DET_TOPK_STRICT=0
+         STARTUP_CONCURRENCY_PROBE=0
          "$Q0_SCRIPT" serve)
+  fi
+  if curl -fsS --max-time 2 "${BASE_URL}/v1/models" >/dev/null 2>&1; then
+    warn "an existing server is listening at $BASE_URL; stopping it before k=$k"
+    "$Q0_SCRIPT" stop >>"$RESULTS_DIR/server_stop.log" 2>&1 || true
+    wait_down || die "endpoint remained live after baseline stop; refusing to benchmark a stale configuration"
   fi
   log "starting frozen baseline (k=$k)"
   if [[ -n "${cmd:-}" ]]; then
@@ -90,6 +126,7 @@ server_start() {
   else
     "${CMD[@]}" >>"$RESULTS_DIR/server_k${k}.log" 2>&1 &
   fi
+  SERVER_LAUNCH_PID=$!
   SERVER_ACTIVE=1
   if ! wait_ready; then
     server_stop
@@ -102,6 +139,11 @@ server_stop() {
   (( SERVER_ACTIVE )) || return 0
   log "stopping server"
   "$Q0_SCRIPT" stop >>"$RESULTS_DIR/server_stop.log" 2>&1 || warn "baseline stop returned nonzero (continuing)"
+  wait_down || warn "endpoint still responds after stop"
+  if [[ -n "$SERVER_LAUNCH_PID" ]]; then
+    wait "$SERVER_LAUNCH_PID" 2>/dev/null || true
+    SERVER_LAUNCH_PID=""
+  fi
   SERVER_ACTIVE=0
   sleep "$INTER_DELAY"
 }
@@ -176,7 +218,7 @@ mem_sampler_stop() {
 
 run_cell() {
   local phase=$1 k=$2 streams=$3 workload=$4 ctx=$5 rep=$6 warmup=$7 prompt=$8
-  local run_id="${phase}_k${k}_s${streams}_${workload}_ctx${ctx}_r${rep}_$(date +%s)"
+  local run_id="${phase}_k${k}_s${streams}_${workload}_ctx${ctx}_r${rep}_$(date +%s%N)"
   local dir="$RESULTS_DIR/runs/$run_id"
   mkdir -p "$dir"
   local form_m
@@ -186,7 +228,8 @@ run_cell() {
   if (( warmup == 1 )); then is_warmup=true; fi
   cat > "$dir/config.json" <<JSON
 {
-  "run_id": "$run_id", "ts": "$(date -u +%Y-%m-%dT%H:%M:%SZ)", "phase": "$phase",
+  "run_id": "$run_id", "session_id": "$RUN_SESSION_ID",
+  "ts": "$(date -u +%Y-%m-%dT%H:%M:%SZ)", "phase": "$phase",
   "warmup": $is_warmup, "repeat": $rep, "workload": "$workload", "k": $k, "streams": $streams,
   "form_m_estimate": $form_m, "context_tokens": $ctx,
   "prompt_sha256": "$(sha256_of "$prompt")"
@@ -203,9 +246,8 @@ JSON
   python3 "$HERE/lib/metrics_delta.py" "$dir/metrics_before.txt" "$dir/metrics_after.txt" "$dir/metrics_delta.json" \
     || echo '{"counters_delta":{},"histogram_bucket_deltas":{},"counter_series_deltas":{}}' > "$dir/metrics_delta.json"
 
-  python3 - "$dir" "$RESULTS_DIR/results.jsonl" "$(sha256_of "$Q0_SCRIPT")" "$(sha256_of "${SIDECAR_LAYER0:-/nonexistent}")" \
-    "$(docker images -q "$RUNTIME_IMAGE" 2>/dev/null | head -1 || true)" <<'PY'
-import json, os, sys
+  python3 - "$dir" "$RESULTS_DIR/results.jsonl" "$BASELINE_SHA" "$SIDECAR_SHA" "$RUNTIME_IMAGE_ID" <<'PY'
+import json, os, re, sys
 dir_, results_path, script_sha, sidecar_sha, image_digest = sys.argv[1:6]
 cfg = json.load(open(os.path.join(dir_, "config.json")))
 res = json.load(open(os.path.join(dir_, "streams.json")))
@@ -221,21 +263,26 @@ if os.path.exists(mp):
             host_min = h if host_min is None else min(host_min, h)
 cd = md.get("counters_delta", {})
 def g(n): return int(cd.get(n, 0) or 0)
-per_pos = []
-for name, series in md.get("histogram_bucket_deltas", {}).items():
-    if "accepted" in name and "per_pos" in name:
-        per_pos = series
-if not per_pos:
-    for name, series in md.get("counter_series_deltas", {}).items():
-        if "accepted" in name and any("pos" in str(k) for k in series):
-            per_pos = [series[k] for k in sorted(series)]
+per_pos_map = {}
+for name, series in md.get("counter_series_deltas", {}).items():
+    if "accepted" not in name or "per_pos" not in name:
+        continue
+    for labels, value in series.items():
+        m = re.search(r'(?:position|pos)="?(\d+)"?', labels)
+        if m:
+            position = int(m.group(1))
+            per_pos_map[position] = per_pos_map.get(position, 0) + value
+per_pos = [per_pos_map[i] for i in sorted(per_pos_map)]
 rec = {
-  "run_id": cfg["run_id"], "ts": cfg["ts"], "phase": cfg["phase"], "warmup": cfg["warmup"],
+  "run_id": cfg["run_id"], "session_id": cfg["session_id"], "ts": cfg["ts"],
+  "phase": cfg["phase"], "warmup": cfg["warmup"],
   "repeat": cfg["repeat"], "workload": cfg["workload"], "k": cfg["k"], "streams": cfg["streams"],
   "form_m_estimate": cfg["form_m_estimate"], "context_tokens": cfg["context_tokens"],
   "prompt_sha256": cfg["prompt_sha256"], "script_sha256": script_sha,
   "sidecar_layer0_sha256": sidecar_sha, "runtime_image_digest": image_digest,
-  "output_tokens": res.get("output_tokens", 0), "aggregate_tps": res.get("aggregate_tps", 0.0),
+  "output_tokens": res.get("output_tokens", 0), "decode_tokens": res.get("decode_tokens", 0),
+  "decode_window_s": res.get("decode_window_s"), "aggregate_tps": res.get("aggregate_tps", 0.0),
+  "request_total_tps": res.get("request_total_tps", 0.0),
   "per_stream_tps": res.get("per_stream_tps_mean", 0.0),
   "ttft": res.get("ttft_mean"), "ttft_s_mean": res.get("ttft_mean"), "ttft_s_p95": res.get("ttft_p95"),
   "prompt_tokens_actual": res.get("prompt_tokens"), "wall_time_s": res.get("wall_time_s"),
@@ -246,6 +293,7 @@ rec = {
   "memory_peak_gib": round(gpu, 3),
   "mem_available_min_gib": round(host_min, 3) if host_min is not None else None,
   "streams_ok": res.get("ok_streams", 0), "streams_err": res.get("err_streams", 0),
+  "valid": res.get("ok_streams", 0) == cfg["streams"] and res.get("err_streams", 0) == 0,
   "errors": res.get("errors", [])[:3],
 }
 json.dump(rec, open(os.path.join(dir_, "run.json"), "w"), indent=2)
@@ -300,6 +348,7 @@ PY
 
 sweep_short() {
   require_fingerprint
+  printf '%s\n' "$RUN_SESSION_ID" > "$RESULTS_DIR/current-session.txt"
   log "=== Phase 0 short matrix: k=${SHORT_KS[*]} streams=${SHORT_STREAMS[*]} workloads=${SHORT_WORKLOADS[*]} ==="
   local k streams workload
   for k in "${SHORT_KS[@]}"; do
@@ -309,8 +358,8 @@ sweep_short() {
         local prompt="$HERE/prompts/${workload}.txt"
         ensure_workload_prompt "$workload" "$prompt"
         for i in $(seq 1 $(( WARMUP_REPEATS + MEASURED_REPEATS ))); do
-          local warmup=0 rep=$i
-          if (( i <= WARMUP_REPEATS )); then warmup=1; rep=0; fi
+          local warmup=0 rep=$(( i - WARMUP_REPEATS ))
+          if (( i <= WARMUP_REPEATS )); then warmup=1; rep=$i; fi
           run_cell short "$k" "$streams" "$workload" 0 "$rep" "$warmup" "$prompt"
         done
       done
@@ -321,14 +370,15 @@ sweep_short() {
 }
 
 best_ks_from_results() {
-  python3 - "$RESULTS_DIR/results.jsonl" "$LONG_SECOND_MARGIN" <<'PY'
+  python3 - "$RESULTS_DIR/results.jsonl" "$LONG_SECOND_MARGIN" "$RUN_SESSION_ID" <<'PY'
 import json, sys
-path, margin = sys.argv[1], float(sys.argv[2])
+path, margin, session_id = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 acc = {}
 try:
     for line in open(path):
         r = json.loads(line)
-        if r.get("phase") == "short" and not r.get("warmup"):
+        if (r.get("session_id") == session_id and r.get("phase") == "short"
+                and not r.get("warmup") and r.get("valid", True)):
             acc.setdefault(r["k"], []).append(r["aggregate_tps"])
 except FileNotFoundError:
     pass
@@ -354,8 +404,8 @@ sweep_long() {
     for ctx in "${LONG_CONTEXTS[@]}"; do
       local prompt; prompt=$(ensure_long_prompt "$ctx")
       for i in $(seq 1 $(( WARMUP_REPEATS + LONG_REPEATS ))); do
-        local warmup=0 rep=$i
-        if (( i <= WARMUP_REPEATS )); then warmup=1; rep=0; fi
+        local warmup=0 rep=$(( i - WARMUP_REPEATS ))
+        if (( i <= WARMUP_REPEATS )); then warmup=1; rep=$i; fi
         run_cell long "$k" 1 long "$ctx" "$rep" "$warmup" "$prompt"
       done
     done
@@ -367,31 +417,48 @@ sweep_long() {
 # -------------------------------------------------------------- check ----
 
 require_fingerprint() {
+  need_cmd curl
+  need_cmd flock
   need_cmd jq
   need_cmd python3
+  need_cmd sha256sum
   [[ -f "$Q0_SCRIPT" ]] || die "frozen baseline not found at Q0_SCRIPT=$Q0_SCRIPT"
   mkdir -p "$RESULTS_DIR/runs" "$HERE/prompts"
+  [[ -n "$BASELINE_SHA" ]] || BASELINE_SHA="$(sha256_of "$Q0_SCRIPT")"
+  if [[ -z "$SIDECAR_SHA" && -n "${SIDECAR_LAYER0:-}" && -f "$SIDECAR_LAYER0" ]]; then
+    # Layer-0 can be large. Hash it once per harness process, never once per
+    # benchmark cell, or the fingerprint itself perturbs the I/O experiment.
+    SIDECAR_SHA="$(sha256_of "$SIDECAR_LAYER0")"
+  fi
+  if [[ -z "$RUNTIME_IMAGE_ID" ]]; then
+    RUNTIME_IMAGE_ID="$(docker images -q "$RUNTIME_IMAGE" 2>/dev/null | head -1 || true)"
+  fi
 }
 
 check() {
   require_fingerprint
   log "=== Phase 0.1: environment, fingerprints, profiler verification ==="
-  log "frozen baseline sha256: $(sha256_of "$Q0_SCRIPT")"
-  if [[ -n "${SIDECAR_LAYER0:-}" && -f "${SIDECAR_LAYER0}" ]]; then
-    log "sidecar layer-0 sha256: $(sha256_of "$SIDECAR_LAYER0")"
+  log "frozen baseline sha256: $BASELINE_SHA"
+  if [[ -n "$SIDECAR_SHA" ]]; then
+    log "sidecar layer-0 sha256: $SIDECAR_SHA"
   else
     warn "sidecar layer-0 not found (set SIDECAR_DIR); runs will carry empty sidecar hash"
   fi
-  docker inspect --format '{{.Id}}' "$RUNTIME_IMAGE" >/dev/null 2>&1 \
-    && log "runtime image digest: $(docker images -q "$RUNTIME_IMAGE" | head -1)" \
-    || warn "runtime image $RUNTIME_IMAGE not present locally"
+  local image_present=0
+  if [[ -n "$RUNTIME_IMAGE_ID" ]] && docker inspect --format '{{.Id}}' "$RUNTIME_IMAGE" >/dev/null 2>&1; then
+    image_present=1
+    log "runtime image digest: $RUNTIME_IMAGE_ID"
+  else
+    warn "runtime image $RUNTIME_IMAGE not present locally; skipping container profiler probe (no implicit pull)"
+  fi
 
   local prof="$RESULTS_DIR/profile_check.json"
   local do_probe=1
-  if [[ -f "$prof" ]]; then do_probe=0; fi
-  python3 - "$prof" "$RUNTIME_IMAGE" "$NCU_TEST" "$do_probe" <<'PY'
+  if [[ -f "$prof" && "$PROFILE_RECHECK" != "1" ]]; then do_probe=0; fi
+  python3 - "$prof" "$RUNTIME_IMAGE" "$NCU_TEST" "$do_probe" "$image_present" <<'PY'
 import json, os, shutil, subprocess, sys
-prof, image, ncu_test, do_probe = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4] == "1"
+prof, image = sys.argv[1], sys.argv[2]
+ncu_test, do_probe, image_present = (x == "1" for x in sys.argv[3:6])
 out = {}
 def run(cmd, timeout=300):
     try:
@@ -402,16 +469,22 @@ def run(cmd, timeout=300):
 if os.path.exists(prof):
     out = json.load(open(prof))
 for tool in ("ncu", "nsys"):
-    out[f"{tool}_present"] = shutil.which(tool) is not None
-if out.get("ncu_present") and "ncu_version" not in out:
+    out[f"host_{tool}_present"] = shutil.which(tool) is not None
+if out.get("host_ncu_present") and "ncu_version" not in out:
     out["ncu_version"] = run(["ncu", "--version"], 30)
     out["ncu_sets"] = run(["ncu", "--list-sets"], 120)
     out["ncu_query_metrics_rc"] = run(["ncu", "--query-metrics"], 300).get("rc")
-if do_probe and ncu_test and out.get("ncu_present") and shutil.which("docker"):
-    probe = run(["docker", "run", "--rm", "--gpus", "all", "--privileged", image, "bash", "-lc",
-                 "python3 -c \"import torch; x=torch.rand(1<<20, device='cuda'); print(float(x.sum()))\"",
-                 "ncu", "--target-processes", "all", "--metrics", "gpu__time_duration.sum", "--launch-count", "1",
-                 "python3", "-c", "\"import torch; x=torch.rand(1<<20, device='cuda'); print(float(x.sum()))\""], timeout=420)
+if do_probe and ncu_test and image_present and shutil.which("docker"):
+    # Execute ncu and the CUDA workload in the same container. Passing ncu as
+    # arguments after `bash -lc` only sets shell positional parameters and
+    # never profiles anything, so keep the complete probe in one command.
+    probe_cmd = (
+        "command -v ncu >/dev/null || exit 127; "
+        "ncu --target-processes all --metrics gpu__time_duration.sum --launch-count 1 "
+        "python3 -c 'import torch; x=torch.rand(1<<20, device=\"cuda\"); print(float(x.sum()))'"
+    )
+    probe = run(["docker", "run", "--rm", "--gpus", "all", "--cap-add", "SYS_ADMIN",
+                 image, "bash", "-lc", probe_cmd], timeout=420)
     out["ncu_kernel_probe"] = probe
     out["ncu_usable"] = probe.get("rc") == 0 and "Traceback" not in probe.get("stdout_head", "") + probe.get("stderr_head", "")
 if "ncu_usable" not in out:
@@ -433,19 +506,25 @@ report() {
   python3 - "$RESULTS_DIR/results.jsonl" "$RESULTS_DIR/summary.csv" "$RESULTS_DIR/summary.json" <<'PY'
 import json, sys, csv, statistics as st
 path, csv_out, json_out = sys.argv[1:4]
-rows = [json.loads(l) for l in open(path) if not json.loads(l).get("warmup")]
+rows = []
+for line in open(path):
+    row = json.loads(line)
+    if not row.get("warmup") and row.get("valid", True):
+        rows.append(row)
 if not rows:
     print("no measured rows"); sys.exit(0)
 groups = {}
 for r in rows:
-    groups.setdefault((r["phase"], r["k"], r["streams"], r["workload"], r.get("context_tokens", 0)), []).append(r)
+    groups.setdefault((r.get("session_id", "legacy"), r["phase"], r["k"], r["streams"],
+                       r["workload"], r.get("context_tokens", 0)), []).append(r)
 summary = []
 for key, rs in sorted(groups.items()):
     t = [r["aggregate_tps"] for r in rs if r["aggregate_tps"]]
     tt = [r["ttft_s_mean"] for r in rs if r.get("ttft_s_mean")]
     dc = sum(r["draft_cycles"] for r in rs); at = sum(r["accepted_tokens"] for r in rs); dt = sum(r["draft_tokens"] for r in rs)
     summary.append({
-        "phase": key[0], "k": key[1], "streams": key[2], "workload": key[3], "context_tokens": key[4],
+        "session_id": key[0], "phase": key[1], "k": key[2], "streams": key[3],
+        "workload": key[4], "context_tokens": key[5],
         "n_runs": len(rs), "mean_agg_tps": round(st.mean(t), 2) if t else None,
         "std_agg_tps": round(st.stdev(t), 2) if len(t) > 1 else 0.0,
         "mean_ttft_s": round(st.mean(tt), 3) if tt else None,
@@ -471,8 +550,13 @@ main() {
   trap cleanup EXIT
   case "$action" in
     check)        check ;;
-    sweep-short)  check || true; sweep_short ;;
-    sweep-long)   check || true; sweep_long ;;
+    sweep-short)  check; sweep_short ;;
+    sweep-long)
+      [[ -s "$RESULTS_DIR/current-session.txt" ]] \
+        || die "no short-sweep session found; run sweep-short first or use full"
+      RUN_SESSION_ID="$(tr -d '\r\n' < "$RESULTS_DIR/current-session.txt")"
+      check; sweep_long
+      ;;
     full)         check; sweep_short; sweep_long ;;
     report)       report ;;
     *) die "unknown action: $action (check|sweep-short|sweep-long|full|report)" ;;

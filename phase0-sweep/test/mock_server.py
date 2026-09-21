@@ -8,11 +8,12 @@ Advances speculative-decode counters on every completion when --k>0.
 import argparse
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOCK = threading.Lock()
 C = {"requests": 0, "prompt_tok": 0, "gen_tok": 0, "drafts": 0, "draft_tok": 0, "accepted": 0}
-EXACT = [0, 0, 0, 0]  # accepted-per-exact-count histogram, index 0..3
+POS = [0, 0, 0, 0]  # accepted token count at draft position, matching vLLM
 PATTERN = [2, 1, 3, 0, 2, 2, 1, 3]
 TURN = [0]
 ARGS = None
@@ -40,15 +41,15 @@ class Handler(BaseHTTPRequestHandler):
             ]
             if ARGS.k > 0:
                 lines += [
-                    "vllm:spec_decode_num_drafts_total %d" % C["drafts"],
-                    "vllm:spec_decode_num_draft_tokens_total %d" % C["draft_tok"],
-                    "vllm:spec_decode_num_accepted_tokens_total %d" % C["accepted"],
+                    'vllm:spec_decode_num_drafts_total{engine="0",model_name="mock"} %d' % C["drafts"],
+                    'vllm:spec_decode_num_draft_tokens_total{engine="0",model_name="mock"} %d' % C["draft_tok"],
+                    'vllm:spec_decode_num_accepted_tokens_total{engine="0",model_name="mock"} %d' % C["accepted"],
                 ]
-                cum = 0
-                for i in range(4):
-                    cum += EXACT[i]
-                    lines.append('vllm:spec_decode_num_accepted_tokens_per_pos_bucket{model_name="mock",le="%d"} %d' % (i, cum))
-                lines.append('vllm:spec_decode_num_accepted_tokens_per_pos_count{model_name="mock"} %d' % C["drafts"])
+                for i in range(ARGS.k):
+                    lines.append(
+                        'vllm:spec_decode_num_accepted_tokens_per_pos_total'
+                        '{engine="0",model_name="mock",position="%d"} %d' % (i, POS[i])
+                    )
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             body = ("\n".join(lines) + "\n").encode()
@@ -74,13 +75,15 @@ class Handler(BaseHTTPRequestHandler):
                 C["drafts"] += 1
                 C["draft_tok"] += ARGS.k
                 C["accepted"] += acc
-                EXACT[acc] += 1
+                for pos in range(acc):
+                    POS[pos] += 1
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         for _ in range(8):
+            time.sleep(0.002)
             chunk = {"choices": [{"index": 0, "delta": {"content": " tok"}}]}
             self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
             self.wfile.flush()
