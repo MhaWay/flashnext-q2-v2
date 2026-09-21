@@ -34,4 +34,23 @@ long_rows = [r for r in rows if r["phase"] == "long" and not r["warmup"]]
 assert long_rows
 assert all(r["prompt_calibrated_tokens"] for r in long_rows)
 PY
+# A standalone long rerun must link to the short sweep without reusing its
+# session ID, otherwise changed scheduler/output policies get averaged.
+SHORT_SESSION="$(tr -d '\r\n' < "$RESULTS_DIR/current-session.txt")"
+RERUN_RESULTS="$HERE/results-rerun"
+rm -rf "$RERUN_RESULTS"
+mkdir -p "$RERUN_RESULTS"
+cp "$RESULTS_DIR/results.jsonl" "$RESULTS_DIR/current-session.txt" "$RERUN_RESULTS/"
+RESULTS_DIR="$RERUN_RESULTS" LONG_KS_LIST=0 WARMUP_REPEATS=0 LONG_REPEATS=1 \
+  bash "$BASE/phase0-sweep.sh" sweep-long
+python3 - "$RERUN_RESULTS/results.jsonl" "$SHORT_SESSION" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+short_session = sys.argv[2]
+last = rows[-1]
+assert last["phase"] == "long"
+assert last["session_id"] != short_session
+assert last["parent_short_session_id"] == short_session
+assert last["max_num_batched_tokens"] == 4096
+PY
 echo "SMOKE OK: $(wc -l < "$RESULTS_DIR/results.jsonl") rows"
