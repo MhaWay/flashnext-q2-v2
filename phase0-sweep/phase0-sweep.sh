@@ -27,7 +27,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${NCU_TEST:=1}"
 : "${PROFILE_RECHECK:=0}"
 : "${MTP_KV_CACHE_MEMORY_BYTES:=20G}"              # applied to every cell (config parity)
-: "${MTP_BATCHED_TOKENS:=8192}"
+: "${MTP_BATCHED_TOKENS:=4096}"
 : "${MTP_MAX_NUM_SEQS:=8}"
 : "${MTP_Q2_DECODE_W13_BLOCK_N:=16}"
 : "${MTP_Q2_DECODE_W2_BLOCK_N:=16}"
@@ -52,6 +52,7 @@ BASELINE_SHA=""
 HARNESS_SHA=""
 SIDECAR_SHA=""
 RUNTIME_IMAGE_ID=""
+PARENT_SHORT_SESSION_ID=""
 
 log()  { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 warn() { printf '[%s] WARN: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
@@ -235,9 +236,13 @@ run_cell() {
   cat > "$dir/config.json" <<JSON
 {
   "run_id": "$run_id", "session_id": "$RUN_SESSION_ID",
+  "parent_short_session_id": "${PARENT_SHORT_SESSION_ID:-}",
   "ts": "$(date -u +%Y-%m-%dT%H:%M:%SZ)", "phase": "$phase",
   "warmup": $is_warmup, "repeat": $rep, "workload": "$workload", "k": $k, "streams": $streams,
   "form_m_estimate": $form_m, "context_tokens": $ctx,
+  "max_num_batched_tokens": $MTP_BATCHED_TOKENS,
+  "max_num_seqs": $MTP_MAX_NUM_SEQS, "max_tokens": $MAX_TOKENS,
+  "no_thinking": $NO_THINKING,
   "prompt_calibrated_tokens": $prompt_calibrated_tokens, "prompt_bytes": $prompt_bytes,
   "prompt_sha256": "$(sha256_of "$prompt")"
 }
@@ -292,9 +297,13 @@ for name, series in md.get("counter_series_deltas", {}).items():
 per_pos = [per_pos_map[i] for i in sorted(per_pos_map)]
 rec = {
   "run_id": cfg["run_id"], "session_id": cfg["session_id"], "ts": cfg["ts"],
+  "parent_short_session_id": cfg.get("parent_short_session_id") or None,
   "phase": cfg["phase"], "warmup": cfg["warmup"],
   "repeat": cfg["repeat"], "workload": cfg["workload"], "k": cfg["k"], "streams": cfg["streams"],
   "form_m_estimate": cfg["form_m_estimate"], "context_tokens": cfg["context_tokens"],
+  "max_num_batched_tokens": cfg.get("max_num_batched_tokens"),
+  "max_num_seqs": cfg.get("max_num_seqs"), "max_tokens": cfg.get("max_tokens"),
+  "no_thinking": cfg.get("no_thinking"),
   "prompt_calibrated_tokens": cfg.get("prompt_calibrated_tokens"),
   "prompt_bytes": cfg.get("prompt_bytes"),
   "prompt_sha256": cfg["prompt_sha256"], "script_sha256": script_sha,
@@ -383,7 +392,8 @@ sweep_short() {
 }
 
 best_ks_from_results() {
-  python3 - "$RESULTS_DIR/results.jsonl" "$LONG_SECOND_MARGIN" "$RUN_SESSION_ID" <<'PY'
+  local source_session="${PARENT_SHORT_SESSION_ID:-$RUN_SESSION_ID}"
+  python3 - "$RESULTS_DIR/results.jsonl" "$LONG_SECOND_MARGIN" "$source_session" <<'PY'
 import json, sys
 path, margin, session_id = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 acc = {}
@@ -409,7 +419,7 @@ PY
 
 sweep_long() {
   require_fingerprint
-  local ks; ks=$(best_ks_from_results)
+  local ks; ks="${LONG_KS_LIST:-$(best_ks_from_results)}"
   log "=== Phase 0 long-context matrix; k set = {$ks} ==="
   local k ctx i
   for k in $ks; do
@@ -544,6 +554,10 @@ for key, rs in sorted(groups.items()):
     summary.append({
         "session_id": key[0], "phase": key[1], "k": key[2], "streams": key[3],
         "workload": key[4], "context_tokens": key[5],
+        "parent_short_session_id": next((r.get("parent_short_session_id") for r in rs
+                                          if r.get("parent_short_session_id")), None),
+        "max_num_batched_tokens": next((r.get("max_num_batched_tokens") for r in rs
+                                         if r.get("max_num_batched_tokens") is not None), None),
         "n_runs": len(rs), "mean_agg_tps": round(st.mean(t), 2) if t else None,
         "std_agg_tps": round(st.stdev(t), 2) if len(t) > 1 else 0.0,
         "mean_ttft_s": round(st.mean(tt), 3) if tt else None,
@@ -574,7 +588,7 @@ main() {
     sweep-long)
       [[ -s "$RESULTS_DIR/current-session.txt" ]] \
         || die "no short-sweep session found; run sweep-short first or use full"
-      RUN_SESSION_ID="$(tr -d '\r\n' < "$RESULTS_DIR/current-session.txt")"
+      PARENT_SHORT_SESSION_ID="$(tr -d '\r\n' < "$RESULTS_DIR/current-session.txt")"
       check; sweep_long
       ;;
     full)         check; sweep_short; sweep_long ;;
