@@ -18,6 +18,8 @@ def load_rows(run_dir: pathlib.Path) -> tuple[dict, list[dict]]:
 def aggregate(rows: list[dict]) -> dict[str, dict[str, float]]:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
+        if not row.get("valid_for_quality", True):
+            continue
         grouped[row["task_id"]].append(row)
     return {
         task_id: {

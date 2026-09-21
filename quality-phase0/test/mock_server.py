@@ -50,10 +50,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/v1/chat/completions":
             response = answer(prompt)
+            truncated = int(request.get("max_tokens") or 0) == 7
             self.reply({
                 "id": "mock-completion",
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": response},
-                             "finish_reason": "stop"}],
+                             "finish_reason": "length" if truncated else "stop"}],
                 "usage": {"prompt_tokens": len(prompt.split()), "completion_tokens": len(response.split())},
             })
             return

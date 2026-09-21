@@ -24,7 +24,11 @@ python3 "$ROOT/quality-phase0/lib/run_quality.py" \
 python3 "$ROOT/quality-phase0/lib/run_quality.py" \
   --base-url http://127.0.0.1:18124 --model mock-quality \
   --implementation-id mock-candidate --tasks "$ROOT/quality-phase0/tasks/core-v1.jsonl" \
-  --out-dir "$TMP/candidate" --fail-on-task-error
+  --out-dir "$TMP/candidate" --force-max-tokens 128 --fail-on-task-error
+python3 "$ROOT/quality-phase0/lib/run_quality.py" \
+  --base-url http://127.0.0.1:18124 --model mock-quality \
+  --implementation-id mock-truncated --tasks "$ROOT/quality-phase0/tasks/core-v1.jsonl" \
+  --out-dir "$TMP/truncated" --force-max-tokens 7 --fail-on-task-error
 python3 "$ROOT/quality-phase0/lib/compare_quality.py" \
   --baseline "$TMP/baseline" --candidate "$TMP/candidate" \
   --out-json "$TMP/comparison.json" --out-md "$TMP/comparison.md"
@@ -47,11 +51,18 @@ summary = json.loads((root / "baseline/summary.json").read_text())
 comparison = json.loads((root / "comparison.json").read_text())
 fidelity = json.loads((root / "fidelity.json").read_text())
 long_summary = json.loads((root / "long-run/summary.json").read_text())
+truncated_summary = json.loads((root / "truncated/summary.json").read_text())
 assert summary["task_count"] == 10
 assert summary["pass_rate"] == 1.0
+assert summary["valid_row_count"] == 10
 assert not summary["critical_failures"]
 assert comparison["promotion_gate_passed"]
 assert fidelity["exact_match_rate"] == 1.0
 assert long_summary["pass_rate"] == 1.0
+assert truncated_summary["valid_row_count"] == 0
+assert truncated_summary["truncated_row_count"] == 10
+assert truncated_summary["pass_rate"] is None
+candidate_manifest = json.loads((root / "candidate/manifest.json").read_text())
+assert candidate_manifest["force_max_tokens"] == 128
 PY
 echo "QUALITY SMOKE OK"

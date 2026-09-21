@@ -55,6 +55,11 @@ embedding/lm-head precision, KV format, MTP depth and MTP precision.
 - MTP: accepted tokens per draft cycle, draft cost, target-output fidelity and
   end-to-end tok/s.
 
+Rows truncated at the generation limit are invalid for quality scoring. They
+must remain in the raw artifact with `finish_reason`, usage and partial output,
+but are excluded from aggregate pass rates. Thinking and no-thinking profiles
+require separate, explicitly recorded output budgets.
+
 Never collapse all domains into one unexplained “retention” percentage. If a
 summary is necessary, publish the per-domain table next to it.
 
@@ -99,4 +104,3 @@ long-context observations estimate `d` near 0.50 for the tested k=1 runtime,
 so a practical policy should use hysteresis around that break-even rather than
 enable MTP unconditionally. This estimate must be recomputed after changing
 draft precision, QSA metadata or graph capture.
-

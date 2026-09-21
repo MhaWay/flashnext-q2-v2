@@ -20,6 +20,8 @@ def load(run_dir: pathlib.Path) -> tuple[dict, dict[tuple[str, int, int], dict]]
         if not line.strip():
             continue
         row = json.loads(line)
+        if not row.get("valid_for_quality", True):
+            continue
         key = (row["task_id"], int(row["repeat"]), int(row["seed"]))
         rows[key] = row
     return manifest, rows

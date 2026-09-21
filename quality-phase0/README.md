@@ -80,3 +80,20 @@ python3 quality-phase0/lib/compare_fidelity.py \
   --out quality-phase0/results/mtp-fidelity-$STAMP.json \
   --require-exact
 ```
+
+For a diagnostic thinking run, override the deliberately small no-thinking
+budgets and identify the profile explicitly:
+
+```bash
+python3 quality-phase0/lib/run_quality.py \
+  --base-url http://127.0.0.1:8012 \
+  --model qwen3.8-flash-next-q2 \
+  --implementation-id q2-v0114-k0-thinking-2048 \
+  --tasks quality-phase0/tasks/core-v1.jsonl \
+  --out-dir quality-phase0/results/q2-k0-thinking-$STAMP \
+  --repeats 3 --no-thinking 0 --force-max-tokens 2048
+```
+
+Rows ending with `finish_reason=length` are retained as evidence but marked
+`valid_for_quality=false` and excluded from headline scores. The manifest
+records the forced token budget and complete `extra_body` object.

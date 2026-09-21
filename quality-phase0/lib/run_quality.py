@@ -113,13 +113,15 @@ def git_revision(repo: pathlib.Path) -> str | None:
 
 
 def request_completion(args: argparse.Namespace, task: dict[str, Any], seed: int) -> tuple[dict, float]:
+    max_tokens = (args.force_max_tokens if args.force_max_tokens is not None
+                  else int(task.get("max_tokens", args.max_tokens)))
     body: dict[str, Any] = {
         "model": args.model,
         "messages": [
             {"role": "system", "content": task.get("system", "Follow the user instruction exactly.")},
             {"role": "user", "content": task["prompt"]},
         ],
-        "max_tokens": int(task.get("max_tokens", args.max_tokens)),
+        "max_tokens": max_tokens,
         "temperature": float(task.get("temperature", args.temperature)),
         "seed": seed,
         "stream": False,
@@ -154,6 +156,8 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1701)
     parser.add_argument("--max-tokens", type=int, default=256)
+    parser.add_argument("--force-max-tokens", type=int,
+                        help="override every per-task max_tokens value (useful for thinking runs)")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("--no-thinking", type=int, choices=(0, 1), default=1)
@@ -170,6 +174,8 @@ def main() -> None:
         raise SystemExit("--extra-body-json must decode to an object")
     if args.repeats < 1:
         raise SystemExit("--repeats must be >= 1")
+    if args.force_max_tokens is not None and args.force_max_tokens < 1:
+        raise SystemExit("--force-max-tokens must be >= 1")
 
     tasks_raw = args.tasks.read_bytes()
     tasks = load_tasks(args.tasks)
@@ -186,7 +192,10 @@ def main() -> None:
         "repeats": args.repeats,
         "seed_base": args.seed,
         "temperature_default": args.temperature,
+        "max_tokens_default": args.max_tokens,
+        "force_max_tokens": args.force_max_tokens,
         "no_thinking": args.no_thinking,
+        "extra_body": args.extra_body,
         "baseline_sha256": args.baseline_sha256 or None,
         "sidecar_sha256": args.sidecar_sha256 or None,
         "runtime_image_id": args.runtime_image_id or None,
@@ -216,21 +225,30 @@ def main() -> None:
                     choice = response["choices"][0]
                     message = choice.get("message") or {}
                     text = message.get("content") or ""
+                    reasoning_text = message.get("reasoning_content") or ""
                     score, detail = score_response(text, task["scorer"])
+                    finish_reason = choice.get("finish_reason")
+                    truncated = finish_reason == "length"
                     row.update({
                         "ok": True,
                         "score": score,
                         "passed": score >= float(task.get("pass_score", 1.0)),
+                        "valid_for_quality": not truncated,
+                        "truncated": truncated,
                         "score_detail": detail,
                         "latency_s": round(latency, 6),
-                        "finish_reason": choice.get("finish_reason"),
+                        "finish_reason": finish_reason,
                         "response": text,
                         "response_sha256": sha256_bytes(text.encode("utf-8")),
+                        "reasoning_content": reasoning_text,
+                        "reasoning_sha256": (sha256_bytes(reasoning_text.encode("utf-8"))
+                                             if reasoning_text else None),
                         "usage": response.get("usage") or {},
                     })
                 except Exception as exc:  # all request failures belong in the artifact
                     failures += 1
                     row.update({"ok": False, "score": 0.0, "passed": False,
+                                "valid_for_quality": False, "truncated": False,
                                 "error": f"{type(exc).__name__}: {exc}"})
                 sink.write(json.dumps(row, ensure_ascii=False) + "\n")
                 sink.flush()
@@ -240,21 +258,35 @@ def main() -> None:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         grouped[row["category"]].append(row)
-    categories = {
-        category: {
-            "n": len(values),
-            "mean_score": sum(v["score"] for v in values) / len(values),
-            "pass_rate": sum(bool(v["passed"]) for v in values) / len(values),
+    categories = {}
+    for category, values in sorted(grouped.items()):
+        valid = [value for value in values if value.get("valid_for_quality", True)]
+        categories[category] = {
+            "rows": len(values),
+            "valid_rows": len(valid),
+            "truncated_rows": sum(bool(value.get("truncated")) for value in values),
+            "mean_score": (sum(value["score"] for value in valid) / len(valid) if valid else None),
+            "pass_rate": (sum(bool(value["passed"]) for value in valid) / len(valid) if valid else None),
         }
-        for category, values in sorted(grouped.items())
-    }
+    valid_rows = [row for row in rows if row.get("valid_for_quality", True)]
     summary = {
         **manifest,
         "row_count": len(rows),
+        "valid_row_count": len(valid_rows),
+        "invalid_row_count": len(rows) - len(valid_rows),
+        "truncated_row_count": sum(bool(row.get("truncated")) for row in rows),
         "request_failures": failures,
-        "mean_score": sum(row["score"] for row in rows) / len(rows),
-        "pass_rate": sum(bool(row["passed"]) for row in rows) / len(rows),
-        "critical_failures": sorted({row["task_id"] for row in rows if row["critical"] and not row["passed"]}),
+        "mean_score": (sum(row["score"] for row in valid_rows) / len(valid_rows)
+                       if valid_rows else None),
+        "pass_rate": (sum(bool(row["passed"]) for row in valid_rows) / len(valid_rows)
+                      if valid_rows else None),
+        "critical_failures": sorted({
+            row["task_id"] for row in valid_rows if row["critical"] and not row["passed"]
+        }),
+        "critical_invalid": sorted({
+            row["task_id"] for row in rows
+            if row["critical"] and not row.get("valid_for_quality", True)
+        }),
         "categories": categories,
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
