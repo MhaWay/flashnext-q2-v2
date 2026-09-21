@@ -38,7 +38,12 @@ Matrix (defaults): k=0..3 x streams=1/2/4/8 x {prose, code} x (1 warmup + 3
 measured) at 512 forced output tokens; then long contexts
 64/4096/32768/131072/250000 on k=0 + best k (+ second if within 3% margin).
 Piece overrides: `SHORT_KS_LIST`, `SHORT_STREAMS_LIST`, `SHORT_WORKLOADS_LIST`,
-`LONG_CONTEXTS_LIST`, `MAX_TOKENS`, `MEASURED_REPEATS`, `INTER_DELAY`, `NCU_TEST`.
+`LONG_CONTEXTS_LIST`, `LONG_KS_LIST`, `MTP_BATCHED_TOKENS`, `MAX_TOKENS`,
+`MEASURED_REPEATS`, `INTER_DELAY`, `NCU_TEST`.
+
+The stable GB10 default is a 4096-token scheduler chunk. The 8192-token real
+prefill path showed a first-use JIT/Inductor stall and is retained as an
+explicit diagnostic override, not as the measurement default.
 
 ## Before the first real run
 
